@@ -1,0 +1,22 @@
+name: Publish to crates.io
+
+# Manual trigger only for the first publish (v0.2.0, bootstrap with the
+# CARGO_REGISTRY_TOKEN repository secret). After this publish, the plan is
+# to configure crates.io Trusted Publishing (OIDC) for this repo + workflow
+# and drop the long-lived token; the trigger can then move to version tags.
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
