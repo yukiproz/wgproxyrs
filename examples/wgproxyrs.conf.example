@@ -1,14 +1,15 @@
-# Example only — placeholder keys, NOT usable credentials.
+# Example only — the keys below are dummy byte sequences (0..31, 32..63),
+# NOT real credentials and NOT a matching keypair.
 # Copy to a real .conf (gitignored in this repo), set permissions to 0600,
 # and replace every value with your own WireGuard config.
 
 [Interface]
-PrivateKey = REPLACE_WITH_YOUR_BASE64_PRIVATE_KEY
+PrivateKey = AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
 Address = 10.0.0.2/32
 DNS = 10.0.0.1
 
 [Peer]
-PublicKey = REPLACE_WITH_PEER_BASE64_PUBLIC_KEY
+PublicKey = ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=
 Endpoint = vpn.example.com:51820
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25

@@ -10,10 +10,42 @@ keywords = ["wireguard", "proxy", "socks5", "vpn", "userspace"]
 categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
-# Intentionally empty for the scaffold. Planned, per DESIGN.md:
-#   boringtun (crates.io release) — WireGuard protocol core
-#   smoltcp                       — userspace TCP/IP netstack
-#   tokio                         — async runtime for listeners + tunnel loop
+# WireGuard protocol core (crates.io release, per DESIGN.md).
+boringtun = "0.7.1"
+# Userspace TCP/IP netstack: TCP client sockets + DNS over the tunnel.
+smoltcp = { version = "0.14.0", default-features = false, features = [
+    "std",
+    "alloc",
+    "medium-ip",
+    "proto-ipv4",
+    "proto-ipv6",
+    "socket-tcp",
+    "socket-udp",
+    "socket-dns",
+] }
+# Async runtime for the proxy listeners.
+tokio = { version = "1.54.1", features = ["full"] }
+# Stock WireGuard keys are base64-encoded in .conf files.
+base64 = "0.23.1"
+# Matches the rand_core used by boringtun's re-exported x25519 types;
+# used for ephemeral key generation (`genkey`) and tunnel indices.
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+
+[dev-dependencies]
+boringtun = "0.7.1"
+smoltcp = { version = "0.14.0", default-features = false, features = [
+    "std",
+    "alloc",
+    "medium-ip",
+    "proto-ipv4",
+    "proto-ipv6",
+    "socket-tcp",
+    "socket-udp",
+    "socket-dns",
+] }
+tokio = { version = "1.54.1", features = ["full"] }
+base64 = "0.23.1"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 
 [profile.release]
 lto = true
