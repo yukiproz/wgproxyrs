@@ -29,6 +29,11 @@ use rand_core::{OsRng, RngCore};
 pub const SESSION_TTL: Duration = Duration::from_secs(180);
 
 /// Largest packet we ever move: a full 64 KiB IP packet plus WG overhead.
+/// This also bounds the configurable-MTU audit (v0.3.0): the largest
+/// inner packet is 9000 (`config::MAX_MTU`), and 9000 + worst-case
+/// WireGuard overhead (~100 bytes) is far below this buffer, so a
+/// configured MTU can never hit a truncation path here. The same holds
+/// for the 65535-byte relay/dispatch buffers in `proxy`/`stack`.
 pub const MAX_PACKET: usize = 65536;
 
 /// A byte-pipe for encapsulated WireGuard packets.

@@ -40,9 +40,13 @@ use tokio::sync::{mpsc, oneshot};
 use crate::config::Cidr;
 use crate::tunnel::WgTunnel;
 
-/// MTU presented to smoltcp. Conservative on purpose: an inner packet of
-/// 1280 bytes plus WireGuard overhead fits any sane underlay path.
-pub const TUNNEL_MTU: usize = 1280;
+/// Default MTU presented to smoltcp when nothing overrides it: 1280,
+/// the IPv6 floor — an inner packet of 1280 bytes plus WireGuard
+/// overhead fits any sane underlay path. The value itself is owned by
+/// [`crate::config::DEFAULT_MTU`]; the effective MTU for a session is
+/// resolved there ([`crate::config::resolve_mtu`]) and arrives via
+/// [`EngineConfig::mtu`].
+pub const TUNNEL_MTU: usize = crate::config::DEFAULT_MTU as usize;
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -51,6 +55,9 @@ pub struct EngineConfig {
     /// DNS servers from the `.conf` (`[Interface] DNS`); queries go through
     /// the tunnel.
     pub dns_servers: Vec<IpAddr>,
+    /// Effective tunnel MTU (inner packet size cap for smoltcp),
+    /// resolved by [`crate::config::resolve_mtu`].
+    pub mtu: usize,
 }
 
 /// One peer's tunnel plus the routing facts the engine needs for it.
@@ -309,13 +316,27 @@ pub fn spawn_engine(peers: Vec<PeerTunnel>, cfg: EngineConfig) -> (EngineHandle,
 // Packet device: two queues between the tunnel and smoltcp.
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
 pub struct PacketDevice {
     rx_queue: VecDeque<Vec<u8>>,
     tx_queue: VecDeque<Vec<u8>>,
+    mtu: usize,
+}
+
+impl Default for PacketDevice {
+    fn default() -> Self {
+        Self::with_mtu(TUNNEL_MTU)
+    }
 }
 
 impl PacketDevice {
+    pub fn with_mtu(mtu: usize) -> Self {
+        Self {
+            rx_queue: VecDeque::new(),
+            tx_queue: VecDeque::new(),
+            mtu,
+        }
+    }
+
     pub fn push_rx(&mut self, packet: Vec<u8>) {
         self.rx_queue.push_back(packet);
     }
@@ -378,7 +399,7 @@ impl Device for PacketDevice {
     fn capabilities(&self) -> DeviceCapabilities {
         // DeviceCapabilities is non-exhaustive: start from default, mutate.
         let mut caps = DeviceCapabilities::default();
-        caps.max_transmission_unit = TUNNEL_MTU;
+        caps.max_transmission_unit = self.mtu;
         caps.max_burst_size = None;
         caps.medium = Medium::Ip;
         // Packets really leave this process (inside WireGuard), so
@@ -482,7 +503,7 @@ fn run_engine(
 
     let peer_routes: Vec<Vec<Cidr>> = peers.iter().map(|p| p.allowed_ips.clone()).collect();
 
-    let mut device = PacketDevice::default();
+    let mut device = PacketDevice::with_mtu(cfg.mtu);
     let mut iface = Interface::new(Config::new(HardwareAddress::Ip), &mut device, now());
     iface.update_ip_addrs(|addrs| {
         for cidr in &cfg.addresses {
