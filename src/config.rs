@@ -8,6 +8,7 @@
 //! Address = 10.0.0.2/32, fd00::2/128   # one or more, CIDR or bare IP
 //! DNS = 10.0.0.1                        # optional, repeatable/comma list
 //! ListenPort = 51820                    # optional
+//! MTU = 1392                            # optional, 576..=9000
 //!
 //! [Peer]
 //! PublicKey = <base64, 32 bytes>
@@ -22,9 +23,13 @@
 //! preshared key means a tunnel that never comes up with no error
 //! anywhere — the v0.2.1 hotfix exists because of exactly that.
 //!
-//! Unknown keys in either section (wg-quick's `Table`, `MTU`, `PreUp`, …)
-//! are ignored, so real-world configs keep parsing. Key material is never
-//! included in error messages or `Debug` output beyond its field name.
+//! Unknown keys in either section (wg-quick's `Table`, `PreUp`, …)
+//! are ignored, so real-world configs keep parsing. `MTU` is *not* one
+//! of them: it is parsed and range-checked, because silently accepting
+//! a garbage MTU — or silently dropping a valid one — is the same class
+//! of silent failure as a dropped preshared key, in the other direction.
+//! Key material is never included in error messages or `Debug` output
+//! beyond its field name.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -37,6 +42,42 @@ use base64::engine::general_purpose::STANDARD as B64;
 /// explicitly configures something wider (DESIGN.md §4.3).
 pub fn default_bind() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1080)
+}
+
+/// Smallest tunnel MTU we accept: 576 is the IPv4 minimum datagram size
+/// every host must be able to reassemble (RFC 791) — below that, nothing
+/// is gained and IPv6 (whose floor is 1280) breaks outright.
+pub const MIN_MTU: u16 = 576;
+
+/// Largest tunnel MTU we accept: the standard jumbo-frame ceiling.
+pub const MAX_MTU: u16 = 9000;
+
+/// Tunnel MTU when neither the config nor `--mtu` says otherwise: 1280,
+/// the IPv6 minimum MTU (RFC 8200) — the largest inner packet guaranteed
+/// to fit any path once WireGuard's overhead is added. Always safe,
+/// never optimal; that trade is deliberate.
+pub const DEFAULT_MTU: u16 = 1280;
+
+/// Parse and validate an MTU value from a config line or `--mtu`.
+/// Anything that is not an integer in `MIN_MTU..=MAX_MTU` is a hard
+/// error naming the key — a silently mangled MTU is a blackhole factory.
+pub fn parse_mtu(value: &str) -> Result<u16, ConfigError> {
+    let value = value.trim();
+    let parsed: i64 = value.parse().map_err(|_| ConfigError::InvalidMtu {
+        value: value.to_string(),
+    })?;
+    if !(i64::from(MIN_MTU)..=i64::from(MAX_MTU)).contains(&parsed) {
+        return Err(ConfigError::InvalidMtu {
+            value: value.to_string(),
+        });
+    }
+    Ok(parsed as u16)
+}
+
+/// The one place the effective tunnel MTU is decided:
+/// `--mtu` beats the config's `MTU`, which beats [`DEFAULT_MTU`].
+pub fn resolve_mtu(cli: Option<u16>, config: Option<u16>) -> u16 {
+    cli.or(config).unwrap_or(DEFAULT_MTU)
 }
 
 /// Runtime settings for one wgproxyrs session (CLI-side, not from the .conf).
@@ -57,6 +98,9 @@ pub struct Settings {
     pub proxy_user: Option<String>,
     /// Proxy password (`--proxy-pass`).
     pub proxy_pass: Option<String>,
+    /// Tunnel MTU override (`--mtu`); beats the config's `MTU` line.
+    /// Resolution lives in [`resolve_mtu`].
+    pub mtu: Option<u16>,
 }
 
 /// One `--tcp-tunnel` specification: a local listen address and the
@@ -77,6 +121,7 @@ impl Settings {
             tcp_tunnels: Vec::new(),
             proxy_user: None,
             proxy_pass: None,
+            mtu: None,
         }
     }
 
@@ -173,6 +218,9 @@ pub struct InterfaceConfig {
     pub addresses: Vec<Cidr>,
     pub dns: Vec<IpAddr>,
     pub listen_port: Option<u16>,
+    /// Tunnel MTU from the `MTU` line, already range-checked by
+    /// [`parse_mtu`]; `None` means "not declared" (see [`resolve_mtu`]).
+    pub mtu: Option<u16>,
 }
 
 // Manual Debug: a derived Debug would print the private key bytes.
@@ -183,6 +231,7 @@ impl fmt::Debug for InterfaceConfig {
             .field("addresses", &self.addresses)
             .field("dns", &self.dns)
             .field("listen_port", &self.listen_port)
+            .field("mtu", &self.mtu)
             .finish()
     }
 }
@@ -236,6 +285,9 @@ pub enum ConfigError {
         key: &'static str,
         value: String,
     },
+    InvalidMtu {
+        value: String,
+    },
     MalformedLine(String),
     UnknownSection(String),
 }
@@ -254,6 +306,10 @@ impl fmt::Display for ConfigError {
             Self::InvalidIp { key, value } => write!(f, "invalid IP for {key}: {value}"),
             Self::InvalidEndpoint(v) => write!(f, "invalid Endpoint (want host:port): {v}"),
             Self::InvalidNumber { key, value } => write!(f, "invalid number for {key}: {value}"),
+            Self::InvalidMtu { value } => write!(
+                f,
+                "invalid MTU: {value} (want an integer in {MIN_MTU}..={MAX_MTU})"
+            ),
             Self::MalformedLine(line) => write!(f, "malformed line (want Key = Value): {line}"),
             Self::UnknownSection(name) => write!(f, "unknown section [{name}]"),
         }
@@ -310,6 +366,7 @@ struct InterfaceBuilder {
     addresses: Vec<Cidr>,
     dns: Vec<IpAddr>,
     listen_port: Option<u16>,
+    mtu: Option<u16>,
 }
 
 #[derive(Default)]
@@ -391,7 +448,8 @@ impl Config {
                             }
                         }
                         "listenport" => b.listen_port = Some(parse_u16("ListenPort", value)?),
-                        _ => {} // wg-quick extras (Table, MTU, PreUp, …): ignored.
+                        "mtu" => b.mtu = Some(parse_mtu(value)?),
+                        _ => {} // wg-quick extras (Table, PreUp, …): ignored.
                     }
                 }
                 Section::Peer(idx) => {
@@ -436,6 +494,7 @@ impl Config {
             },
             dns: iface.dns,
             listen_port: iface.listen_port,
+            mtu: iface.mtu,
         };
         let mut out_peers = Vec::with_capacity(peers.len());
         for peer in peers {
@@ -537,10 +596,11 @@ AllowedIPs = 10.0.0.0/8, 192.168.0.0/16, ::/0
     #[test]
     fn parses_eduvpn_shaped_config_canonical_spellings() {
         // Shaped like a real eduVPN profile: canonical `PreSharedKey`
-        // (capital S), an `MTU` line (wg-quick extra, tolerated), dual-
-        // stack Address/DNS, and a full-tunnel AllowedIPs pair. The
-        // v0.2.0 parser matched keys case-sensitively and silently
-        // dropped the preshared key from exactly this shape of config.
+        // (capital S), an `MTU` line, dual-stack Address/DNS, and a
+        // full-tunnel AllowedIPs pair. The v0.2.0 parser matched keys
+        // case-sensitively and silently dropped the preshared key from
+        // exactly this shape of config; until v0.3.0 the MTU line was
+        // silently ignored as a wg-quick extra.
         let text = "\
 [Interface]
 PrivateKey = AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
@@ -569,6 +629,78 @@ PersistentKeepalive = 25
         assert!(cfg.peers[0].allowed_ips[1].contains(ip("2001:db8::1")));
         assert_eq!(cfg.peers[0].endpoint, "eduvpn.example.com:51820");
         assert_eq!(cfg.peers[0].persistent_keepalive, Some(25));
+        // The MTU line is parsed, not tolerated-and-dropped.
+        assert_eq!(cfg.interface.mtu, Some(1392));
+    }
+
+    /// Minimal valid config carrying one extra [Interface] line.
+    fn config_with_mtu_line(line: &str) -> Result<Config, ConfigError> {
+        let text = format!(
+            "\
+[Interface]
+PrivateKey = AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+Address = 10.0.0.2/32
+{line}
+
+[Peer]
+PublicKey = ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0
+"
+        );
+        Config::parse(&text)
+    }
+
+    #[test]
+    fn mtu_parsed_canonical_and_mixed_case() {
+        let cfg = config_with_mtu_line("MTU = 1392").expect("canonical MTU parses");
+        assert_eq!(cfg.interface.mtu, Some(1392));
+        let cfg = config_with_mtu_line("mTu = 1420").expect("mixed-case MTU parses");
+        assert_eq!(cfg.interface.mtu, Some(1420));
+        // Both range boundaries are accepted.
+        let cfg = config_with_mtu_line("MTU = 576").expect("lower bound parses");
+        assert_eq!(cfg.interface.mtu, Some(MIN_MTU));
+        let cfg = config_with_mtu_line("MTU = 9000").expect("upper bound parses");
+        assert_eq!(cfg.interface.mtu, Some(MAX_MTU));
+    }
+
+    #[test]
+    fn mtu_absent_is_none() {
+        let cfg = config_with_mtu_line("ListenPort = 51820").expect("config without MTU parses");
+        assert_eq!(cfg.interface.mtu, None);
+        // The shipped example file declares no MTU either.
+        let cfg = Config::parse(EXAMPLE).expect("example config parses");
+        assert_eq!(cfg.interface.mtu, None);
+    }
+
+    #[test]
+    fn error_bad_mtu_values() {
+        // Every invalid class is a hard error naming MTU: zero, below
+        // the floor, above the ceiling, negative, non-numeric, empty.
+        for bad in ["0", "575", "9001", "-1", "abc", "13.5", ""] {
+            let line = format!("MTU = {bad}");
+            let err = config_with_mtu_line(&line)
+                .expect_err(&format!("MTU value {bad:?} must be rejected"));
+            assert!(
+                matches!(err, ConfigError::InvalidMtu { .. }),
+                "MTU value {bad:?} must yield InvalidMtu, got {err:?}"
+            );
+            assert!(
+                err.to_string().contains("MTU"),
+                "error must name the key: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mtu_resolution_order() {
+        // CLI beats config beats the 1280 default — the single resolver
+        // every caller goes through.
+        assert_eq!(resolve_mtu(Some(1400), Some(1392)), 1400);
+        assert_eq!(resolve_mtu(Some(1400), None), 1400);
+        assert_eq!(resolve_mtu(None, Some(1392)), 1392);
+        assert_eq!(resolve_mtu(None, None), DEFAULT_MTU);
+        assert_eq!(DEFAULT_MTU, 1280);
     }
 
     #[test]
