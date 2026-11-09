@@ -1,7 +1,11 @@
 //! The WireGuard tunnel: a boringtun core behind a transport abstraction.
 //!
-//! Two transports exist:
-//! - [`UdpTransport`] — production: a plain UDP socket to the peer endpoint.
+//! Three transports exist:
+//! - [`UdpTransport`] — production, single peer: a plain UDP socket to
+//!   the peer endpoint.
+//! - [`SharedUdpTransport`] — production, multi-peer: one shared UDP
+//!   socket demultiplexed by source address (see
+//!   [`shared_udp_transports`]).
 //! - [`MemoryTransport`] — tests: in-memory channels carrying the same
 //!   encapsulated packets. This matters because some environments (Yuki's
 //!   VM) block *all* UDP sends, including loopback; the whole tunnel stack
@@ -91,6 +95,77 @@ pub fn memory_pair() -> (MemoryTransport, MemoryTransport) {
         MemoryTransport { tx: a_tx, rx: b_rx },
         MemoryTransport { tx: b_tx, rx: a_rx },
     )
+}
+
+/// WireGuard has exactly one listen port per interface, so a multi-peer
+/// client needs one real UDP socket shared by all peers, demultiplexed by
+/// source address. [`shared_udp_transports`] binds that socket once and
+/// hands back one [`Transport`] per peer: sends go to the peer's fixed
+/// endpoint, receives are fed by a dedicated dispatcher thread reading the
+/// shared socket and queueing packets per source address (unknown sources
+/// are dropped). The dispatcher thread lives for the process lifetime.
+pub struct SharedUdpTransport {
+    socket: std::sync::Arc<UdpSocket>,
+    peer: SocketAddr,
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+pub fn shared_udp_transports(
+    bind: SocketAddr,
+    peers: &[SocketAddr],
+) -> io::Result<Vec<SharedUdpTransport>> {
+    use std::sync::mpsc::channel;
+    let socket = std::sync::Arc::new(UdpSocket::bind(bind)?);
+    let mut senders = Vec::with_capacity(peers.len());
+    let mut transports = Vec::with_capacity(peers.len());
+    for &peer in peers {
+        let (tx, rx) = channel::<Vec<u8>>();
+        senders.push((peer, tx));
+        transports.push(SharedUdpTransport {
+            socket: socket.clone(),
+            peer,
+            rx,
+        });
+    }
+    let dispatch_socket = socket.clone();
+    std::thread::Builder::new()
+        .name("wgproxyrs-udp-dispatch".into())
+        .spawn(move || {
+            let mut buf = vec![0u8; 65535];
+            loop {
+                match dispatch_socket.recv_from(&mut buf) {
+                    Ok((n, src)) => {
+                        if let Some((_, tx)) = senders.iter().find(|(peer, _)| *peer == src) {
+                            let _ = tx.send(buf[..n].to_vec());
+                        }
+                        // Unknown source: not one of our peers — drop.
+                    }
+                    Err(_) => {
+                        // The shared socket is blocking; a receive error
+                        // here means the socket is gone. End the thread.
+                        return;
+                    }
+                }
+            }
+        })?;
+    Ok(transports)
+}
+
+impl Transport for SharedUdpTransport {
+    fn send(&mut self, packet: &[u8]) -> io::Result<()> {
+        self.socket.send_to(packet, self.peer).map(|_| ())
+    }
+    fn recv(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        match self.rx.try_recv() {
+            Ok(packet) => {
+                let n = packet.len().min(buf.len());
+                buf[..n].copy_from_slice(&packet[..n]);
+                Ok(Some(n))
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty)
+            | Err(std::sync::mpsc::TryRecvError::Disconnected) => Ok(None),
+        }
+    }
 }
 
 impl Transport for MemoryTransport {
