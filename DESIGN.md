@@ -93,3 +93,46 @@ is why this repo exists.
    front-ends reach it only through byte channels and a DNS request
    channel. Multi-peer configs parse today, but v0.1 drives the first
    peer; AllowedIPs from all peers still gate destinations.
+
+## 8. Phase 3 — wireproxy parity (2026-11-09, v0.2.0)
+
+Decision 5 above is superseded: the engine now carries **one tunnel per
+peer** and routes by cryptokey routing, exactly like WireGuard itself.
+
+### Parity table
+
+| wireproxy feature | wgproxyrs status |
+|---|---|
+| SOCKS5 proxy (TCP CONNECT) | ✅ since v0.1 |
+| HTTP CONNECT proxy | ✅ since v0.1 |
+| SOCKS5 UDP ASSOCIATE | ✅ Phase 3 (RFC 1928; FRAG=0 only; control connection governs lifetime) |
+| Multi-peer + AllowedIPs routing | ✅ Phase 3 (longest-prefix, both directions; shared underlay socket demultiplexed by peer endpoint) |
+| TCPClient tunnels (fixed forward) | ✅ Phase 3 (`--tcp-tunnel <listen>=<target>`) |
+| TCPServer (reverse tunnel) | ❌ Not planned — the local-first use case (apps on this machine reaching into the tunnel) does not need it, and it would expose tunnel-side listeners by design |
+| Proxy authentication | ✅ Phase 3 (`--proxy-user`/`--proxy-pass`; RFC 1929 / HTTP Basic) |
+| Health/info endpoint | ✅ Phase 3 (`--info-bind` JSON + `wgproxyrs status --info <addr>` probe) |
+| Daemon mode | ✅ Phase 3 (`--daemon` / `--pidfile` / `--log-file` / `--silent`) |
+| UDPClient/UDPServer static tunnels | ❌ Out of scope — wireproxy lists UDP tunnels as TODO itself; UDP ASSOCIATE covers dynamic UDP |
+| Transparent SNI proxy | ❌ Out of scope — see ROADMAP.md |
+| AmneziaWG | ❌ Out of scope — different protocol dialect, different threat model |
+| Config format | Stock `.conf` + CLI flags (wireproxy uses a custom format; ours is the standing UX edge, kept on purpose) |
+
+### Decisions taken in Phase 3
+
+6. **UDP ASSOCIATE rides the netstack**, not raw sockets: each session
+   gets a smoltcp UDP socket in the engine, routed per datagram by the
+   same cryptokey table as TCP. The local relay leg is a per-session UDP
+   socket bound to the interface the control connection arrived on, so
+   BND.ADDR is always reachable. Fragmented datagrams are dropped (RFC
+   1928 permits this; reassembly state is an attack surface).
+7. **Info endpoint returns HTTP 200 always** (when it answers at all):
+   the body carries tunnel state, so a launcher distinguishes "process
+   gone" (connect failure) from "tunnel down" (200 + `"status":"down"`).
+   The `status` subcommand folds that into an exit code.
+8. **Daemon mode forks before the async runtime exists** (fork is only
+   safe single-threaded), with a readiness pipe: the parent reports
+   success only after the child has setsid'd, redirected stdio and
+   written the pidfile. Default pidfile: `./<config-stem>.pid`.
+9. **Auth is checked before any tunnel work** and never instead of it:
+   a 407 / auth failure reveals nothing about tunnel state, and a passed
+   auth still faces the fail-closed destination checks.

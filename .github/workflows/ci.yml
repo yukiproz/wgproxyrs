@@ -46,6 +46,64 @@ jobs:
           "$BIN" --config "$CONF" --check
           rm -f "$CONF"
 
+      # Daemon + info endpoint + status probe, against a config whose
+      # endpoint (127.0.0.1:59999) never answers: the tunnel must report
+      # DOWN truthfully, the probe must exit 1, and killing by pidfile
+      # PID must leave no process behind.
+      - name: Smoke (daemon + info endpoint + status probe)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=./target/release/wgproxyrs
+          PRIV=$("$BIN" genkey | sed -n 's/^PrivateKey = //p')
+          PUB=$("$BIN" genkey | sed -n 's/^PublicKey = //p')
+          WORK=$(mktemp -d)
+          printf '[Interface]\nPrivateKey = %s\nAddress = 10.0.0.2/32\nDNS = 10.0.0.1\n\n[Peer]\nPublicKey = %s\nEndpoint = 127.0.0.1:59999\nAllowedIPs = 10.0.0.0/24\n' "$PRIV" "$PUB" > "$WORK/wg0.conf"
+
+          "$BIN" --config "$WORK/wg0.conf" \
+            --bind 127.0.0.1:11080 --info-bind 127.0.0.1:18099 \
+            --daemon --pidfile "$WORK/wg0.pid" --log-file "$WORK/wg0.log"
+
+          test -f "$WORK/wg0.pid"
+          PID=$(cat "$WORK/wg0.pid")
+          kill -0 "$PID"
+          echo "daemon running as $PID"
+
+          # The info endpoint must answer and report down (judge by the
+          # body, never by curl's exit code).
+          BODY=""
+          for i in $(seq 1 20); do
+            BODY=$(curl -s http://127.0.0.1:18099/ || true)
+            [ -n "$BODY" ] && break
+            sleep 0.25
+          done
+          echo "info body: $BODY"
+          echo "$BODY" | grep -q '"status":"down"'
+          echo "$BODY" | grep -q '"handshake_age_secs":null'
+          echo "$BODY" | grep -q '"per_peer":\[{"endpoint":"127.0.0.1:59999"'
+
+          # The status probe must exit 1 while down (and print the JSON).
+          if "$BIN" status --info 127.0.0.1:18099; then
+            echo "status probe must exit non-zero while the tunnel is down" >&2
+            exit 1
+          fi
+
+          # The daemon's log captured the ready line.
+          grep -q "ready:" "$WORK/wg0.log"
+
+          # Kill by pidfile PID; the process must actually go away.
+          kill "$PID"
+          for i in $(seq 1 20); do
+            if ! kill -0 "$PID" 2>/dev/null; then break; fi
+            sleep 0.25
+          done
+          if kill -0 "$PID" 2>/dev/null; then
+            echo "daemon $PID did not exit after SIGTERM" >&2
+            exit 1
+          fi
+          echo "daemon stopped cleanly"
+          rm -rf "$WORK"
+
   # The distributable binary: statically linked (musl), so it runs on any
   # x86_64 Linux regardless of the host glibc. Consumers download this
   # artifact instead of cloning + building (a local build costs ~200 MB

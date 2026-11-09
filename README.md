@@ -25,23 +25,38 @@ that:
 
 ## Status
 
-**v0.1 works end to end** (see [DESIGN.md](DESIGN.md) and
+**v0.2 — wireproxy parity set complete** (see [DESIGN.md](DESIGN.md) and
 [ROADMAP.md](ROADMAP.md)):
 
 - Stock WireGuard `.conf` parsing, `genkey`, and a `--check` mode that
   validates a config without touching the network.
 - boringtun tunnel core + smoltcp netstack, driven by one engine thread;
-  transports: real UDP in production, in-memory channels in tests.
-- SOCKS5 (no-auth, CONNECT, IPv4/IPv6/domain) and HTTP CONNECT proxies.
-  Domain names resolve *through the tunnel* via the config's DNS server.
-- Fail-closed, verified by tests: with no live handshake, CONNECT is
-  refused and nothing is opened.
-- Readiness signal: the binary logs tunnel up/down transitions with
-  handshake age, and the library exposes the same status to callers.
+  transports: real UDP in production (one shared socket, demultiplexed
+  per peer, when a config has several peers), in-memory channels in
+  tests.
+- **Multi-peer for real:** one tunnel per `[Peer]`, cryptokey routing by
+  longest-prefix match over all peers' AllowedIPs, in both directions.
+- SOCKS5 — CONNECT (IPv4/IPv6/domain) **and UDP ASSOCIATE** (RFC 1928,
+  FRAG=0 only) — and HTTP CONNECT. Domain names resolve *through the
+  tunnel* via the config's DNS server.
+- **TCP tunnels** (`--tcp-tunnel <listen>=<target>`, repeatable):
+  wireproxy's TCPClient equivalent, no proxy protocol on the local leg.
+- **Proxy auth** (`--proxy-user` / `--proxy-pass`): RFC 1929 for SOCKS5,
+  HTTP Basic `Proxy-Authorization` for CONNECT. Binding a non-loopback
+  address without auth prints a loud startup warning.
+- **Health/info endpoint** (`--info-bind`): tunnel truth as JSON, plus a
+  `wgproxyrs status --info <addr>` probe that exits 0 only when the
+  tunnel is up — built for launcher scripts.
+- **Daemon mode** (`--daemon`, `--pidfile`, `--log-file`, `--silent`).
+- Fail-closed everywhere, verified by tests: with no live handshake,
+  CONNECT is refused, UDP ASSOCIATE is refused, TCP tunnels drop
+  connections, and proxy auth never bypasses the tunnel-state check.
+- Kernel interop proven live: this client against a kernel WireGuard
+  server passed SOCKS5 + HTTP CONNECT marker fetches and fail-closed
+  checks (2026-11-09).
 
-Not yet: SOCKS5 UDP ASSOCIATE and proxy auth for non-localhost binds
-(Phase 3 — binding wider than localhost is currently possible via
-`--bind`, but do it only on networks you trust until auth lands).
+Deliberately not implemented (see ROADMAP.md): transparent SNI proxy,
+UDP static tunnels, AmneziaWG obfuscation, wireproxy config format.
 
 ## Usage
 
@@ -57,6 +72,25 @@ wgproxyrs --config ./wg0.conf --bind 127.0.0.1:1080 --http-bind 127.0.0.1:8080
 
 # Then point proxy-aware applications at it, e.g.:
 curl --proxy socks5h://127.0.0.1:1080 https://example.com
+
+# UDP ASSOCIATE works too (DNS over the tunnel, QUIC, game traffic):
+curl --proxy socks5h://127.0.0.1:1080 ...
+
+# Fixed TCP tunnel (no proxy protocol on the local leg):
+wgproxyrs --config ./wg0.conf --tcp-tunnel 127.0.0.1:15432=10.0.0.5:5432
+
+# Proxy auth (required by clients when set; both flags or neither):
+wgproxyrs --config ./wg0.conf --proxy-user hadi --proxy-pass s3cret
+
+# Health endpoint + one-line readiness probe for launchers:
+wgproxyrs --config ./wg0.conf --info-bind 127.0.0.1:18099
+wgproxyrs status --info 127.0.0.1:18099   # exit 0 only when tunnel is up
+curl -s http://127.0.0.1:18099/
+# {"status":"up","handshake_age_secs":3,"endpoint":"203.0.113.1:51820","per_peer":[...]}
+
+# Daemon mode (pidfile default: ./<config-stem>.pid next to your shell's cwd):
+wgproxyrs --config ./wg0.conf --daemon --log-file ./wgproxyrs.log
+kill "$(cat ./wg0.pid)"
 ```
 
 ## Lineage
