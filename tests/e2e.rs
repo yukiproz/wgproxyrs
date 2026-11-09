@@ -1201,7 +1201,9 @@ async fn udp_associate_large_datagram_uses_config_mtu() {
     // pinning the harness back to 1280 makes this test time out.)
     const MTU: usize = 1420;
     const PAYLOAD_LEN: usize = MTU - 28;
-    assert!(PAYLOAD_LEN + 28 > TUNNEL_MTU);
+    // Compile-time guard on the test's own arithmetic: the inner
+    // packet must exceed the default MTU, or the proof is vacuous.
+    const { assert!(PAYLOAD_LEN + 28 > TUNNEL_MTU) };
 
     let relay_local: SocketAddr = "127.0.0.1:41001".parse().unwrap();
     let channels = udp_channels(relay_local);
