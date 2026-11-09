@@ -33,7 +33,7 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
-use wgproxyrs::config::Cidr;
+use wgproxyrs::config::{Cidr, Config as WgConfig};
 use wgproxyrs::info::{run_info_listener, status_is_up};
 use wgproxyrs::proxy::{
     ProxyAuth, ProxyCtx, Target, UdpRecvFuture, UdpRelayEnd, UdpRelayFactory, UdpSendFuture,
@@ -65,6 +65,7 @@ fn smol_now(epoch: StdInstant) -> SmolInstant {
 fn spawn_peer(
     peer_priv: [u8; 32],
     client_pub: [u8; 32],
+    psk: Option<[u8; 32]>,
     transport: Box<dyn Transport>,
     stop: Arc<AtomicBool>,
     peer_ip: Ipv4Addr,
@@ -73,7 +74,7 @@ fn spawn_peer(
         .name("wgproxyrs-test-peer".into())
         .spawn(move || {
             let epoch = StdInstant::now();
-            let mut tunn = WgTunnel::new(peer_priv, client_pub, None, None, transport);
+            let mut tunn = WgTunnel::new(peer_priv, client_pub, psk, None, transport);
             let mut device = PacketDevice::default();
             let mut iface = Interface::new(
                 Config::new(HardwareAddress::Ip),
@@ -243,6 +244,10 @@ struct HarnessOpts {
     auth: Option<ProxyAuth>,
     udp_factory: Option<UdpRelayFactory>,
     with_info: bool,
+    /// Preshared key for the client tunnel (as parsed from a config).
+    client_psk: Option<[u8; 32]>,
+    /// Preshared key the harness peer expects.
+    peer_psk: Option<[u8; 32]>,
 }
 
 /// Engine whose peer never answers: the "other end" of the transport is
@@ -307,12 +312,19 @@ async fn start_harness_with(
     let peer_thread = spawn_peer(
         peer_priv,
         client_pub,
+        opts.peer_psk,
         peer_transport,
         peer_stop.clone(),
         PEER_IP,
     );
 
-    let client_tunnel = WgTunnel::new(client_priv, peer_pub, None, None, client_transport);
+    let client_tunnel = WgTunnel::new(
+        client_priv,
+        peer_pub,
+        opts.client_psk,
+        None,
+        client_transport,
+    );
     let (engine, engine_thread) = spawn_engine(
         vec![PeerTunnel {
             tunnel: client_tunnel,
@@ -616,6 +628,89 @@ async fn fail_closed_when_peer_absent() {
     let _ = engine_thread.join();
 }
 
+/// Regression for the v0.2.1 hotfix: the client's preshared key reaches
+/// the tunnel *through the config parser*, spelled the way eduVPN and
+/// wg-quick write it (`PreSharedKey`, capital S). v0.2.0's parser only
+/// accepted `PresharedKey` and silently dropped the key, so this exact
+/// chain — spelling → parsed bytes → Noise handshake → traffic — is
+/// what has to be proven, against a peer that requires the same PSK.
+#[tokio::test]
+async fn psk_handshake_and_echo_via_canonical_spelling() {
+    let psk: [u8; 32] = std::array::from_fn(|i| 0x40 + i as u8);
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let text = format!(
+        "\
+[Interface]
+PrivateKey = {}
+Address = 10.0.0.2/32
+
+[Peer]
+PublicKey = {}
+PreSharedKey = {}
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0
+",
+        b64.encode([0x11u8; 32]),
+        b64.encode([0x22u8; 32]),
+        b64.encode(psk),
+    );
+    let cfg = WgConfig::parse(&text).expect("config with PreSharedKey parses");
+    let client_psk = cfg.peers[0].preshared_key;
+    assert_eq!(
+        client_psk,
+        Some(psk),
+        "parser must hand the exact PSK bytes to the tunnel"
+    );
+
+    let harness = start_memory_harness_with(HarnessOpts {
+        client_psk,
+        peer_psk: Some(psk),
+        ..Default::default()
+    })
+    .await;
+    harness.wait_up().await;
+
+    let (mut stream, rep) = socks5_connect(harness.socks_addr, PEER_IP, ECHO_PORT).await;
+    assert_eq!(rep, 0, "CONNECT must succeed over the PSK tunnel");
+    echo_roundtrip(&mut stream).await;
+    drop(stream);
+    harness.shutdown();
+}
+
+/// The other half of the hotfix proof: with the peer requiring a PSK,
+/// a client that lacks it — or carries the wrong one — must never come
+/// up. If the PSK were merely parsed but not wired into the Noise
+/// handshake, both cases would connect happily and this test would fail.
+#[tokio::test]
+async fn psk_absent_or_wrong_never_comes_up() {
+    let psk = [0x5Au8; 32];
+    let wrong_psk = [0xA5u8; 32];
+    for client_psk in [None, Some(wrong_psk)] {
+        let harness = start_memory_harness_with(HarnessOpts {
+            client_psk,
+            peer_psk: Some(psk),
+            ..Default::default()
+        })
+        .await;
+        // Watch across several handshake retries: the peer silently
+        // discards every initiation (WireGuard has no error channel),
+        // so the tunnel must stay down and report no handshake.
+        let deadline = StdInstant::now() + Duration::from_secs(3);
+        while StdInstant::now() < deadline {
+            assert!(
+                !harness.engine.is_up(),
+                "tunnel came up with client_psk={client_psk:?} against a PSK peer"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(harness.engine.status().handshake_age.is_none());
+        let (stream, rep) = socks5_connect(harness.socks_addr, PEER_IP, ECHO_PORT).await;
+        assert_ne!(rep, 0, "CONNECT must be refused while the tunnel is down");
+        drop(stream);
+        harness.shutdown();
+    }
+}
+
 /// Real-UDP variant: two UdpTransports on loopback. Ignored by default
 /// because Yuki's VM blocks all UDP sends (even loopback); CI runs it
 /// explicitly with `cargo test -- --ignored`.
@@ -763,8 +858,22 @@ async fn multi_peer_cryptokey_routing() {
     let (c1, s1) = memory_pair();
     let (c2, s2) = memory_pair();
     let stop = Arc::new(AtomicBool::new(false));
-    let peer1_thread = spawn_peer(peer1_priv, client_pub, Box::new(s1), stop.clone(), peer1_ip);
-    let peer2_thread = spawn_peer(peer2_priv, client_pub, Box::new(s2), stop.clone(), peer2_ip);
+    let peer1_thread = spawn_peer(
+        peer1_priv,
+        client_pub,
+        None,
+        Box::new(s1),
+        stop.clone(),
+        peer1_ip,
+    );
+    let peer2_thread = spawn_peer(
+        peer2_priv,
+        client_pub,
+        None,
+        Box::new(s2),
+        stop.clone(),
+        peer2_ip,
+    );
 
     let (engine, engine_thread) = spawn_engine(
         vec![
