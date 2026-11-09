@@ -1,6 +1,6 @@
 [package]
 name = "wgproxyrs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -30,6 +30,9 @@ base64 = "0.23.1"
 # Matches the rand_core used by boringtun's re-exported x25519 types;
 # used for ephemeral key generation (`genkey`) and tunnel indices.
 rand_core = { version = "0.6.4", features = ["getrandom"] }
+# Daemon mode (`--daemon`): fork/setsid/dup2 on unix.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 boringtun = "0.7.1"

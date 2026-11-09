@@ -8,10 +8,15 @@
 //!   production, in-memory channels in tests).
 //! - [`stack`] — the smoltcp netstack engine: tunnel + TCP/DNS bridging
 //!   on a dedicated thread, reached through byte channels.
-//! - [`proxy`] — SOCKS5 and HTTP CONNECT front-ends over abstract async
-//!   streams. Fail-closed: no live handshake, no connection, no fallback.
+//! - [`proxy`] — SOCKS5 (CONNECT + UDP ASSOCIATE), HTTP CONNECT and TCP
+//!   tunnel front-ends over abstract async streams, with optional proxy
+//!   authentication. Fail-closed: no live handshake, no connection, no
+//!   fallback.
+//! - [`info`] — the health/info endpoint: tunnel truth as JSON for
+//!   launcher scripts.
 
 pub mod config;
+pub mod info;
 pub mod keys;
 pub mod proxy;
 pub mod stack;
