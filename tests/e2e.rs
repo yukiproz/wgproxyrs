@@ -39,7 +39,9 @@ use wgproxyrs::proxy::{
     ProxyAuth, ProxyCtx, Target, UdpRecvFuture, UdpRelayEnd, UdpRelayFactory, UdpSendFuture,
     run_http_listener, run_socks5_listener, run_tcp_tunnel_listener,
 };
-use wgproxyrs::stack::{EngineConfig, EngineHandle, PacketDevice, PeerTunnel, spawn_engine};
+use wgproxyrs::stack::{
+    EngineConfig, EngineHandle, PacketDevice, PeerTunnel, TUNNEL_MTU, spawn_engine,
+};
 use wgproxyrs::tunnel::{Transport, UdpTransport, WgTunnel, memory_pair};
 
 const CLIENT_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
@@ -69,13 +71,14 @@ fn spawn_peer(
     transport: Box<dyn Transport>,
     stop: Arc<AtomicBool>,
     peer_ip: Ipv4Addr,
+    mtu: usize,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("wgproxyrs-test-peer".into())
         .spawn(move || {
             let epoch = StdInstant::now();
             let mut tunn = WgTunnel::new(peer_priv, client_pub, psk, None, transport);
-            let mut device = PacketDevice::default();
+            let mut device = PacketDevice::with_mtu(mtu);
             let mut iface = Interface::new(
                 Config::new(HardwareAddress::Ip),
                 &mut device,
@@ -239,7 +242,6 @@ struct Harness {
 }
 
 /// Front-end variations a test can ask the harness for.
-#[derive(Default)]
 struct HarnessOpts {
     auth: Option<ProxyAuth>,
     udp_factory: Option<UdpRelayFactory>,
@@ -248,6 +250,22 @@ struct HarnessOpts {
     client_psk: Option<[u8; 32]>,
     /// Preshared key the harness peer expects.
     peer_psk: Option<[u8; 32]>,
+    /// Effective tunnel MTU for both engines in the harness (the
+    /// client's and the peer's — a real link has one MTU).
+    mtu: usize,
+}
+
+impl Default for HarnessOpts {
+    fn default() -> Self {
+        Self {
+            auth: None,
+            udp_factory: None,
+            with_info: false,
+            client_psk: None,
+            peer_psk: None,
+            mtu: TUNNEL_MTU,
+        }
+    }
 }
 
 /// Engine whose peer never answers: the "other end" of the transport is
@@ -273,6 +291,7 @@ fn dead_engine() -> (EngineHandle, std::thread::JoinHandle<()>) {
                 prefix: 32,
             }],
             dns_servers: vec![IpAddr::V4(PEER_IP)],
+            mtu: TUNNEL_MTU,
         },
     )
 }
@@ -316,6 +335,7 @@ async fn start_harness_with(
         peer_transport,
         peer_stop.clone(),
         PEER_IP,
+        opts.mtu,
     );
 
     let client_tunnel = WgTunnel::new(
@@ -340,6 +360,7 @@ async fn start_harness_with(
                 prefix: 32,
             }],
             dns_servers: vec![IpAddr::V4(PEER_IP)],
+            mtu: opts.mtu,
         },
     );
 
@@ -865,6 +886,7 @@ async fn multi_peer_cryptokey_routing() {
         Box::new(s1),
         stop.clone(),
         peer1_ip,
+        TUNNEL_MTU,
     );
     let peer2_thread = spawn_peer(
         peer2_priv,
@@ -873,6 +895,7 @@ async fn multi_peer_cryptokey_routing() {
         Box::new(s2),
         stop.clone(),
         peer2_ip,
+        TUNNEL_MTU,
     );
 
     let (engine, engine_thread) = spawn_engine(
@@ -906,6 +929,7 @@ async fn multi_peer_cryptokey_routing() {
                 },
             ],
             dns_servers: vec![],
+            mtu: TUNNEL_MTU,
         },
     );
 
@@ -1156,6 +1180,94 @@ async fn socks5_udp_associate_echo_and_dns() {
         Ok(None) => {} // channel closed: the relay end is gone
         Ok(Some(pkt)) => panic!("relay answered after control close: {pkt:?}"),
     }
+
+    harness.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: config MTU, honoured end to end.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn udp_associate_large_datagram_uses_config_mtu() {
+    // Both engines run at MTU 1420 (as resolved from a config MTU).
+    // The payload is sized so the inner IP packet is *exactly* 1420
+    // bytes — 1392 payload + 20 IPv4 + 8 UDP headers. A 1280-MTU stack
+    // could never carry that packet: smoltcp drops over-MTU inner
+    // packets whole (no fragmentation is enabled), so this echo can
+    // only come back if the configured MTU really reached both
+    // netstacks. That is the sharp proof the MTU changed, not just
+    // the plumbing. (Negative control, run once during development:
+    // pinning the harness back to 1280 makes this test time out.)
+    const MTU: usize = 1420;
+    const PAYLOAD_LEN: usize = MTU - 28;
+    assert!(PAYLOAD_LEN + 28 > TUNNEL_MTU);
+
+    let relay_local: SocketAddr = "127.0.0.1:41001".parse().unwrap();
+    let channels = udp_channels(relay_local);
+    let UdpChannels {
+        factory,
+        client_send,
+        mut client_recv,
+    } = channels;
+    let harness = start_memory_harness_with(HarnessOpts {
+        udp_factory: Some(factory),
+        mtu: MTU,
+        ..Default::default()
+    })
+    .await;
+    harness.wait_up().await;
+
+    let mut control = TcpStream::connect(harness.socks_addr).await.unwrap();
+    socks5_handshake(&mut control).await;
+    control
+        .write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0])
+        .await
+        .unwrap();
+    let mut head = [0u8; 4];
+    control.read_exact(&mut head).await.unwrap();
+    assert_eq!(head[1], 0, "UDP ASSOCIATE must succeed");
+    assert_eq!(head[3], 1);
+    let mut bnd = [0u8; 6];
+    control.read_exact(&mut bnd).await.unwrap();
+    let bnd_addr = SocketAddr::from((
+        [bnd[0], bnd[1], bnd[2], bnd[3]],
+        u16::from_be_bytes([bnd[4], bnd[5]]),
+    ));
+    assert_eq!(bnd_addr, relay_local);
+
+    // A deterministic non-repeating pattern, so a truncated or shifted
+    // echo cannot accidentally match.
+    let payload: Vec<u8> = (0..PAYLOAD_LEN).map(|i| (i % 251) as u8).collect();
+    let client_udp: SocketAddr = "127.0.0.1:50001".parse().unwrap();
+    client_send
+        .send((
+            socks_udp_packet(PEER_IP, UDP_ECHO_PORT, &payload, 0),
+            client_udp,
+        ))
+        .await
+        .unwrap();
+    let (resp_pkt, resp_dst) = timeout(Duration::from_secs(15), client_recv.recv())
+        .await
+        .expect("large-datagram UDP echo timed out — configured MTU not in effect?")
+        .unwrap();
+    assert_eq!(resp_dst, client_udp);
+    assert_eq!(&resp_pkt[0..3], &[0, 0, 0]);
+    assert_eq!(
+        &resp_pkt[4..8],
+        &PEER_IP.octets(),
+        "reply source must be the echo server"
+    );
+    assert_eq!(
+        resp_pkt.len() - 10,
+        PAYLOAD_LEN,
+        "echoed payload must arrive whole, not truncated"
+    );
+    assert_eq!(
+        &resp_pkt[10..],
+        payload.as_slice(),
+        "echoed payload must be byte-identical"
+    );
 
     harness.shutdown();
 }

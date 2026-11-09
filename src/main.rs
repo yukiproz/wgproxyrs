@@ -3,7 +3,7 @@
 //! ```text
 //! wgproxyrs --config <path> [--bind 127.0.0.1:1080] [--http-bind <addr>]
 //!           [--info-bind <addr>] [--tcp-tunnel <listen>=<target>]...
-//!           [--proxy-user <u> --proxy-pass <p>]
+//!           [--proxy-user <u> --proxy-pass <p>] [--mtu <n>]
 //!           [--daemon] [--pidfile <path>] [--log-file <path>] [--silent]
 //! wgproxyrs --config <path> --check     # validate config, no network
 //! wgproxyrs status --info <addr>        # tunnel up? exit 0 iff up
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use wgproxyrs::config::{Config, Settings, TcpTunnel};
+use wgproxyrs::config::{Config, MAX_MTU, MIN_MTU, Settings, TcpTunnel, parse_mtu, resolve_mtu};
 use wgproxyrs::info::{run_info_listener, status_is_up};
 use wgproxyrs::keys::generate_keypair;
 use wgproxyrs::proxy::{
@@ -42,6 +42,7 @@ Options:
                             to target <T> (host:port); repeatable
       --proxy-user <USER>   Require proxy authentication (with --proxy-pass)
       --proxy-pass <PASS>   SOCKS5: RFC 1929; HTTP: Basic Proxy-Authorization
+      --mtu <N>         Tunnel MTU, 576..=9000 [default: config MTU, else 1280]
       --daemon          Detach into the background (unix)
       --pidfile <PATH>  Daemon pidfile [default: ./<config-stem>.pid]
       --log-file <PATH> Daemon stdout/stderr redirect target
@@ -168,6 +169,17 @@ fn main() -> ExitCode {
                     None => return usage_error("--proxy-pass needs a value"),
                 }
             }
+            "--mtu" => {
+                i += 1;
+                match args.get(i).and_then(|v| parse_mtu(v).ok()) {
+                    Some(n) => settings_extra.mtu = Some(n),
+                    None => {
+                        return usage_error(&format!(
+                            "--mtu needs an integer in {MIN_MTU}..={MAX_MTU}"
+                        ));
+                    }
+                }
+            }
             other => return usage_error(&format!("unknown argument '{other}'")),
         }
         i += 1;
@@ -185,6 +197,7 @@ fn main() -> ExitCode {
     settings.tcp_tunnels = settings_extra.tcp_tunnels;
     settings.proxy_user = settings_extra.proxy_user;
     settings.proxy_pass = settings_extra.proxy_pass;
+    settings.mtu = settings_extra.mtu;
     if let Err(e) = settings.validate() {
         return usage_error(&e);
     }
@@ -197,6 +210,17 @@ fn main() -> ExitCode {
         }
     };
 
+    // The effective tunnel MTU, decided in exactly one place:
+    // --mtu beats the config's MTU line beats the 1280 default.
+    let mtu = resolve_mtu(settings.mtu, config.interface.mtu);
+    let mtu_source = if settings.mtu.is_some() {
+        "from --mtu"
+    } else if config.interface.mtu.is_some() {
+        "from config"
+    } else {
+        "default"
+    };
+
     if check {
         // --check: parse + summarise. Never prints key material, never
         // touches the network (endpoint resolution included).
@@ -204,6 +228,7 @@ fn main() -> ExitCode {
         for addr in &config.interface.addresses {
             println!("  address: {addr}");
         }
+        println!("  mtu: {mtu} ({mtu_source})");
         for (i, dns) in config.interface.dns.iter().enumerate() {
             println!("  dns[{}]: {dns}", i + 1);
         }
@@ -245,7 +270,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = runtime.block_on(run(settings, config, daemon.silent));
+    let result = runtime.block_on(run(settings, config, mtu, daemon.silent));
     if let Some(pidfile) = &pidfile {
         let _ = std::fs::remove_file(pidfile);
     }
@@ -267,6 +292,7 @@ struct SettingsExtra {
     tcp_tunnels: Vec<TcpTunnel>,
     proxy_user: Option<String>,
     proxy_pass: Option<String>,
+    mtu: Option<u16>,
 }
 
 fn usage_error(msg: &str) -> ExitCode {
@@ -375,7 +401,7 @@ impl Log {
     }
 }
 
-async fn run(settings: Settings, config: Config, silent: bool) -> Result<(), String> {
+async fn run(settings: Settings, config: Config, mtu: u16, silent: bool) -> Result<(), String> {
     let log = Log { silent };
     if config.peers.is_empty() {
         return Err("config has no [Peer] section".into());
@@ -445,6 +471,7 @@ async fn run(settings: Settings, config: Config, silent: bool) -> Result<(), Str
         EngineConfig {
             addresses: config.interface.addresses.clone(),
             dns_servers: config.interface.dns.clone(),
+            mtu: usize::from(mtu),
         },
     );
 
@@ -536,6 +563,7 @@ async fn run(settings: Settings, config: Config, silent: bool) -> Result<(), Str
     if auth.is_some() {
         extras.push_str(" auth=on");
     }
+    extras.push_str(&format!(" mtu={mtu}"));
     log.info(format!(
         "wgproxyrs {} ready: socks5://{}{} peers={} tunnel={}",
         env!("CARGO_PKG_VERSION"),
