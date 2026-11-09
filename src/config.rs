@@ -11,11 +11,16 @@
 //!
 //! [Peer]
 //! PublicKey = <base64, 32 bytes>
-//! PresharedKey = <base64, 32 bytes>     # optional
+//! PreSharedKey = <base64, 32 bytes>     # optional
 //! Endpoint = vpn.example.com:51820
 //! AllowedIPs = 0.0.0.0/0, ::/0
 //! PersistentKeepalive = 25              # optional
 //! ```
+//!
+//! Key names are matched case-insensitively: real-world configs (eduVPN,
+//! wg-quick) write the canonical `PreSharedKey`, and a silently dropped
+//! preshared key means a tunnel that never comes up with no error
+//! anywhere — the v0.2.1 hotfix exists because of exactly that.
 //!
 //! Unknown keys in either section (wg-quick's `Table`, `MTU`, `PreUp`, …)
 //! are ignored, so real-world configs keep parsing. Key material is never
@@ -358,7 +363,9 @@ impl Config {
             let Some((key, value)) = line.split_once('=') else {
                 return Err(ConfigError::MalformedLine(line.to_string()));
             };
-            let key = key.trim();
+            // Keys match case-insensitively, like the section names above:
+            // "PreSharedKey" and "PresharedKey" are the same key.
+            let key = key.trim().to_ascii_lowercase();
             let value = value.trim();
             let Some(section) = &current else {
                 return Err(ConfigError::MalformedLine(line.to_string()));
@@ -366,14 +373,14 @@ impl Config {
             match section {
                 Section::Interface => {
                     let b = interface.as_mut().expect("interface builder exists");
-                    match key {
-                        "PrivateKey" => b.private_key = Some(decode_key("PrivateKey", value)?),
-                        "Address" => {
+                    match key.as_str() {
+                        "privatekey" => b.private_key = Some(decode_key("PrivateKey", value)?),
+                        "address" => {
                             for item in split_list(value) {
                                 b.addresses.push(Cidr::parse(item)?);
                             }
                         }
-                        "DNS" => {
+                        "dns" => {
                             for item in split_list(value) {
                                 let ip: IpAddr =
                                     item.parse().map_err(|_| ConfigError::InvalidIp {
@@ -383,24 +390,24 @@ impl Config {
                                 b.dns.push(ip);
                             }
                         }
-                        "ListenPort" => b.listen_port = Some(parse_u16("ListenPort", value)?),
+                        "listenport" => b.listen_port = Some(parse_u16("ListenPort", value)?),
                         _ => {} // wg-quick extras (Table, MTU, PreUp, …): ignored.
                     }
                 }
                 Section::Peer(idx) => {
                     let b = &mut peers[*idx];
-                    match key {
-                        "PublicKey" => b.public_key = Some(decode_key("PublicKey", value)?),
-                        "PresharedKey" => {
-                            b.preshared_key = Some(decode_key("PresharedKey", value)?)
+                    match key.as_str() {
+                        "publickey" => b.public_key = Some(decode_key("PublicKey", value)?),
+                        "presharedkey" => {
+                            b.preshared_key = Some(decode_key("PreSharedKey", value)?)
                         }
-                        "Endpoint" => b.endpoint = Some(validate_endpoint(value)?),
-                        "AllowedIPs" => {
+                        "endpoint" => b.endpoint = Some(validate_endpoint(value)?),
+                        "allowedips" => {
                             for item in split_list(value) {
                                 b.allowed_ips.push(Cidr::parse(item)?);
                             }
                         }
-                        "PersistentKeepalive" => {
+                        "persistentkeepalive" => {
                             b.persistent_keepalive = Some(parse_u16("PersistentKeepalive", value)?)
                         }
                         _ => {}
@@ -524,6 +531,92 @@ AllowedIPs = 10.0.0.0/8, 192.168.0.0/16, ::/0
                 IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
                 51820
             ))
+        );
+    }
+
+    #[test]
+    fn parses_eduvpn_shaped_config_canonical_spellings() {
+        // Shaped like a real eduVPN profile: canonical `PreSharedKey`
+        // (capital S), an `MTU` line (wg-quick extra, tolerated), dual-
+        // stack Address/DNS, and a full-tunnel AllowedIPs pair. The
+        // v0.2.0 parser matched keys case-sensitively and silently
+        // dropped the preshared key from exactly this shape of config.
+        let text = "\
+[Interface]
+PrivateKey = AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+Address = 10.0.0.2/32, fd00::2/128
+DNS = 10.0.0.1, fd00::1
+MTU = 1392
+
+[Peer]
+PublicKey = ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=
+PreSharedKey = QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = eduvpn.example.com:51820
+PersistentKeepalive = 25
+";
+        let cfg = Config::parse(text).expect("eduVPN-shaped config parses");
+        // The preshared key must be the exact 32 bytes from the file:
+        // base64 "QEFC…" decodes to 0x40..=0x5f.
+        let expected_psk: [u8; 32] = std::array::from_fn(|i| 0x40 + i as u8);
+        assert_eq!(cfg.peers[0].preshared_key, Some(expected_psk));
+        assert_eq!(cfg.interface.addresses.len(), 2);
+        assert_eq!(cfg.interface.addresses[0].addr, ip("10.0.0.2"));
+        assert_eq!(cfg.interface.addresses[1].addr, ip("fd00::2"));
+        assert_eq!(cfg.interface.dns, vec![ip("10.0.0.1"), ip("fd00::1")]);
+        assert_eq!(cfg.peers[0].allowed_ips.len(), 2);
+        assert!(cfg.peers[0].allowed_ips[0].contains(ip("203.0.113.7")));
+        assert!(cfg.peers[0].allowed_ips[1].contains(ip("2001:db8::1")));
+        assert_eq!(cfg.peers[0].endpoint, "eduvpn.example.com:51820");
+        assert_eq!(cfg.peers[0].persistent_keepalive, Some(25));
+    }
+
+    #[test]
+    fn parses_mixed_case_key_spellings() {
+        // Every known key, in a scrambled case, must produce exactly the
+        // config its canonical spelling produces.
+        let canonical = "\
+[Interface]
+PrivateKey = AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+Address = 10.0.0.2/32, fd00::2/128
+DNS = 10.0.0.1
+ListenPort = 51820
+
+[Peer]
+PublicKey = ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=
+PreSharedKey = QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+";
+        let mixed = "\
+[InTeRfAcE]
+privatekey = AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
+ADDRESS = 10.0.0.2/32, fd00::2/128
+Dns = 10.0.0.1
+LISTENPORT = 51820
+
+[PEER]
+publickey = ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=
+pReShArEdKeY = QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=
+ENDPOINT = vpn.example.com:51820
+allowedips = 0.0.0.0/0, ::/0
+PersistentKeepAlive = 25
+";
+        let a = Config::parse(canonical).expect("canonical config parses");
+        let b = Config::parse(mixed).expect("mixed-case config parses");
+        assert_eq!(a.interface.private_key, b.interface.private_key);
+        assert_eq!(a.interface.addresses, b.interface.addresses);
+        assert_eq!(a.interface.dns, b.interface.dns);
+        assert_eq!(a.interface.listen_port, b.interface.listen_port);
+        assert_eq!(a.peers[0].public_key, b.peers[0].public_key);
+        assert_eq!(a.peers[0].preshared_key, b.peers[0].preshared_key);
+        assert!(b.peers[0].preshared_key.is_some());
+        assert_eq!(a.peers[0].endpoint, b.peers[0].endpoint);
+        assert_eq!(a.peers[0].allowed_ips, b.peers[0].allowed_ips);
+        assert_eq!(
+            a.peers[0].persistent_keepalive,
+            b.peers[0].persistent_keepalive
         );
     }
 
