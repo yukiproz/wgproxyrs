@@ -45,3 +45,38 @@ jobs:
           printf '[Interface]\nPrivateKey = %s\nAddress = 10.0.0.2/32\nDNS = 10.0.0.1\n\n[Peer]\nPublicKey = %s\nEndpoint = 127.0.0.1:51820\nAllowedIPs = 0.0.0.0/0\n' "$PRIV" "$PUB" > "$CONF"
           "$BIN" --config "$CONF" --check
           rm -f "$CONF"
+
+  # The distributable binary: statically linked (musl), so it runs on any
+  # x86_64 Linux regardless of the host glibc. Consumers download this
+  # artifact instead of cloning + building (a local build costs ~200 MB
+  # of target/ for a ~1 MB binary).
+  binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl target + linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Build static binary
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CXX_x86_64_unknown_linux_musl: musl-g++
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Verify it is static and runs
+        run: |
+          BIN=./target/x86_64-unknown-linux-musl/release/wgproxyrs
+          file "$BIN"
+          ldd "$BIN" 2>&1 | grep -q "statically linked"
+          "$BIN" --version
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wgproxyrs-linux-x86_64
+          path: target/x86_64-unknown-linux-musl/release/wgproxyrs
+          if-no-files-found: error
