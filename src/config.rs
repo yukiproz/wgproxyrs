@@ -43,6 +43,23 @@ pub struct Settings {
     pub bind: SocketAddr,
     /// Optional separate HTTP CONNECT listener.
     pub http_bind: Option<SocketAddr>,
+    /// Optional health/info endpoint listener (`--info-bind`).
+    pub info_bind: Option<SocketAddr>,
+    /// Fixed TCP tunnels (`--tcp-tunnel <listen>=<target>`), repeatable.
+    pub tcp_tunnels: Vec<TcpTunnel>,
+    /// Proxy username (`--proxy-user`); must be set together with the
+    /// password — `validate` enforces the pair.
+    pub proxy_user: Option<String>,
+    /// Proxy password (`--proxy-pass`).
+    pub proxy_pass: Option<String>,
+}
+
+/// One `--tcp-tunnel` specification: a local listen address and the
+/// `host:port` target (IP or domain) reached through the tunnel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpTunnel {
+    pub listen: SocketAddr,
+    pub target: String,
 }
 
 impl Settings {
@@ -51,6 +68,19 @@ impl Settings {
             config_path,
             bind: default_bind(),
             http_bind: None,
+            info_bind: None,
+            tcp_tunnels: Vec::new(),
+            proxy_user: None,
+            proxy_pass: None,
+        }
+    }
+
+    /// Validate cross-field rules that don't belong to a single flag.
+    pub fn validate(&self) -> Result<(), String> {
+        match (&self.proxy_user, &self.proxy_pass) {
+            (Some(_), None) => Err("--proxy-user set without --proxy-pass".into()),
+            (None, Some(_)) => Err("--proxy-pass set without --proxy-user".into()),
+            _ => Ok(()),
         }
     }
 }
