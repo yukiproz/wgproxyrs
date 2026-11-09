@@ -138,3 +138,40 @@ jobs:
           name: wgproxyrs-linux-x86_64
           path: target/x86_64-unknown-linux-musl/release/wgproxyrs
           if-no-files-found: error
+
+  # The Windows distributable: a standalone wgproxyrs.exe (static CRT, so
+  # no VC++ runtime needs to be installed). Consumers download this
+  # artifact directly from this repo instead of a bundle from elsewhere.
+  binary-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build standalone exe (static CRT)
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: cargo build --release
+
+      - name: Smoke (version, genkey, --check)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=./target/release/wgproxyrs.exe
+          "$BIN" --version
+          PRIV=$("$BIN" genkey | sed -n 's/^PrivateKey = //p')
+          PUB=$("$BIN" genkey | sed -n 's/^PublicKey = //p')
+          test -n "$PRIV" && test -n "$PUB"
+          CONF=$(mktemp)
+          printf '[Interface]\nPrivateKey = %s\nAddress = 10.0.0.2/32\nDNS = 10.0.0.1\n\n[Peer]\nPublicKey = %s\nEndpoint = 127.0.0.1:51820\nAllowedIPs = 0.0.0.0/0\n' "$PRIV" "$PUB" > "$CONF"
+          "$BIN" --config "$CONF" --check
+          rm -f "$CONF"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wgproxyrs-windows-x86_64
+          path: target/release/wgproxyrs.exe
+          if-no-files-found: error
