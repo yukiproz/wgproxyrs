@@ -25,15 +25,35 @@ that:
 
 ## Status
 
-Scaffold. The design is settled (see [DESIGN.md](DESIGN.md) and
-[ROADMAP.md](ROADMAP.md)); the tunnel implementation has not started yet.
-Running the binary today prints its intended usage and exits.
+**v0.1 works end to end** (see [DESIGN.md](DESIGN.md) and
+[ROADMAP.md](ROADMAP.md)):
 
-## Planned usage
+- Stock WireGuard `.conf` parsing, `genkey`, and a `--check` mode that
+  validates a config without touching the network.
+- boringtun tunnel core + smoltcp netstack, driven by one engine thread;
+  transports: real UDP in production, in-memory channels in tests.
+- SOCKS5 (no-auth, CONNECT, IPv4/IPv6/domain) and HTTP CONNECT proxies.
+  Domain names resolve *through the tunnel* via the config's DNS server.
+- Fail-closed, verified by tests: with no live handshake, CONNECT is
+  refused and nothing is opened.
+- Readiness signal: the binary logs tunnel up/down transitions with
+  handshake age, and the library exposes the same status to callers.
+
+Not yet: SOCKS5 UDP ASSOCIATE and proxy auth for non-localhost binds
+(Phase 3 — binding wider than localhost is currently possible via
+`--bind`, but do it only on networks you trust until auth lands).
+
+## Usage
 
 ```bash
-# Accepts a stock WireGuard config directly — no custom config format.
-wgproxyrs --config ./wg0.conf --bind 127.0.0.1:1080
+# Generate a keypair (or take one from your WireGuard provider):
+wgproxyrs genkey
+
+# Validate a config without any network use:
+wgproxyrs --config ./wg0.conf --check
+
+# Run: SOCKS5 on 127.0.0.1:1080, optionally HTTP CONNECT too.
+wgproxyrs --config ./wg0.conf --bind 127.0.0.1:1080 --http-bind 127.0.0.1:8080
 
 # Then point proxy-aware applications at it, e.g.:
 curl --proxy socks5h://127.0.0.1:1080 https://example.com

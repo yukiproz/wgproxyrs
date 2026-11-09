@@ -7,23 +7,27 @@
       `--help`, `--version`), module layout (`config`, `tunnel`, `proxy`)
 - [x] Prior-art survey recorded in DESIGN.md
 
-## Phase 1 — Tunnel spike
+## Phase 1 — Tunnel spike (done 2026-11-09)
 
-- [ ] boringtun (crates.io release) handshake against a real WireGuard peer
-- [ ] smoltcp netstack wired to the tunnel: one proxied TCP flow end to end
-- [ ] Fail-closed check: kill the peer, prove the proxy refuses
+- [x] boringtun (crates.io release) handshake against a real WireGuard peer
+      (second boringtun instance; in-memory transport in the test suite,
+      real UDP loopback in CI's ignored test)
+- [x] smoltcp netstack wired to the tunnel: one proxied TCP flow end to end
+- [x] Fail-closed check: kill the peer, prove the proxy refuses
 
-## Phase 2 — v0.1
+## Phase 2 — v0.1 (done 2026-11-09, one item partial)
 
-- [ ] Stock `.conf` parsing (`[Interface]` / `[Peer]`) + CLI flags
-- [ ] SOCKS5 TCP CONNECT with DNS through the tunnel (socks5h semantics)
-- [ ] HTTP CONNECT
-- [ ] Readiness signal (handshake age) for callers such as bibx
-- [ ] Bind `127.0.0.1` by default; auth when bound wider
+- [x] Stock `.conf` parsing (`[Interface]` / `[Peer]`) + CLI flags
+- [x] SOCKS5 TCP CONNECT with DNS through the tunnel (socks5h semantics)
+- [x] HTTP CONNECT
+- [x] Readiness signal (handshake age) for callers such as bibx
+- [ ] Bind `127.0.0.1` by default *(done)*; auth when bound wider
+      *(not yet — see README status)*
 
 ## Phase 3 — Differentiators
 
 - [ ] SOCKS5 UDP ASSOCIATE, complete and tested
+- [ ] Proxy auth for non-localhost binds
 - [ ] Daemon / background mode and health endpoint (parity with wireproxy)
 - [ ] Re-evaluate rustyguard as an alternative core (it had no release yet
       at survey time; the core boundary is kept swappable for this reason)

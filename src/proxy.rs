@@ -63,8 +63,11 @@ fn rep_for(err: &EngineError) -> u8 {
 /// either side closes. Half-close is honoured: when the client stops
 /// sending, the engine sender drops (sending FIN through the tunnel) while
 /// remaining inbound bytes are still delivered.
-async fn relay<S>(stream: S, to_stack: mpsc::Sender<Vec<u8>>, mut from_stack: mpsc::Receiver<Vec<u8>>)
-where
+async fn relay<S>(
+    stream: S,
+    to_stack: mpsc::Sender<Vec<u8>>,
+    mut from_stack: mpsc::Receiver<Vec<u8>>,
+) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut reader, mut writer) = tokio::io::split(stream);

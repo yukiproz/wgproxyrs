@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy (warnings denied)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests (in-memory transport)
+        run: cargo test
+
+      # The one test that needs real UDP: two UdpTransports over loopback.
+      # It is #[ignore]d because some dev environments block all UDP.
+      - name: UDP loopback e2e (ignored tests)
+        run: cargo test -- --ignored
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Smoke (version, genkey, --check)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=./target/release/wgproxyrs
+          "$BIN" --version
+          PRIV=$("$BIN" genkey | sed -n 's/^PrivateKey = //p')
+          PUB=$("$BIN" genkey | sed -n 's/^PublicKey = //p')
+          test -n "$PRIV" && test -n "$PUB"
+          CONF=$(mktemp)
+          printf '[Interface]\nPrivateKey = %s\nAddress = 10.0.0.2/32\nDNS = 10.0.0.1\n\n[Peer]\nPublicKey = %s\nEndpoint = 127.0.0.1:51820\nAllowedIPs = 0.0.0.0/0\n' "$PRIV" "$PUB" > "$CONF"
+          "$BIN" --config "$CONF" --check
+          rm -f "$CONF"

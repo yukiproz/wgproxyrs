@@ -147,7 +147,9 @@ impl WgTunnel {
 
     /// Ask the peer for a handshake now (no-op if one is already in flight).
     pub fn initiate_handshake(&mut self) {
-        let result = self.tunn.format_handshake_initiation(&mut self.dst_buf, false);
+        let result = self
+            .tunn
+            .format_handshake_initiation(&mut self.dst_buf, false);
         if let TunnResult::WriteToNetwork(packet) = result {
             let packet = packet.to_vec();
             let _ = self.transport.send(&packet);
@@ -177,16 +179,18 @@ impl WgTunnel {
         }
 
         let mut processed = 0;
-        loop {
-            let n = match self.transport.recv(&mut self.recv_buf) {
-                Ok(Some(n)) => n,
-                _ => break,
-            };
+        while let Some(n) = self.next_packet() {
             processed += 1;
             let datagram = self.recv_buf[..n].to_vec();
             self.handle_datagram(&datagram, inbound);
         }
         processed
+    }
+
+    fn next_packet(&mut self) -> Option<usize> {
+        // Transport errors are non-fatal: a dead transport just means the
+        // tunnel stays down, and callers fail closed.
+        self.transport.recv(&mut self.recv_buf).unwrap_or_default()
     }
 
     fn handle_datagram(&mut self, datagram: &[u8], inbound: &mut Vec<Vec<u8>>) {

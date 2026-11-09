@@ -79,9 +79,17 @@ is why this repo exists.
   workload (proxy-aware tools fetching documents and data) and is stated
   here, in advance, rather than discovered later.
 
-## 7. Open questions (implementation phase)
+## 7. Decisions taken in the implementation phase (2026-11-09)
 
-1. Exact shape of the extra proxy settings in/around the stock `.conf`.
-2. SOCKS5 implementation: hand-rolled vs crate.
-3. UDP ASSOCIATE in v1, or immediately after TCP CONNECT + HTTP CONNECT?
-4. Readiness signal: status subcommand, health HTTP endpoint, or both?
+1. Proxy settings live in CLI flags (`--bind`, `--http-bind`); the `.conf`
+   stays a pure stock WireGuard config.
+2. SOCKS5 is hand-rolled against abstract async streams (small surface,
+   fully testable over duplex streams); no proxy-protocol crate.
+3. UDP ASSOCIATE is Phase 3; v0.1 ships TCP CONNECT + HTTP CONNECT.
+4. Readiness signal: a shared tunnel-status value (up + handshake age)
+   in the library, plus up/down transition logging in the binary. A
+   health endpoint stays a Phase 3 candidate.
+5. The tunnel + netstack live on one dedicated engine thread; proxy
+   front-ends reach it only through byte channels and a DNS request
+   channel. Multi-peer configs parse today, but v0.1 drives the first
+   peer; AllowedIPs from all peers still gate destinations.

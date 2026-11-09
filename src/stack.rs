@@ -15,7 +15,7 @@
 //! fail-closed by construction rather than by configuration.
 
 use std::collections::VecDeque;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -25,9 +25,7 @@ use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::{dns, tcp};
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{
-    DnsQueryType, HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address,
-};
+use smoltcp::wire::{DnsQueryType, HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv6Address};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::Cidr;
@@ -123,10 +121,7 @@ impl EngineHandle {
     /// smoltcp connection is established; the returned channels then carry
     /// raw bytes in each direction. Dropping the sender half closes the
     /// stream; the receiver ends when the remote side closes.
-    pub async fn open_stream(
-        &self,
-        target: SocketAddr,
-    ) -> Result<(ByteTx, ByteRx), EngineError> {
+    pub async fn open_stream(&self, target: SocketAddr) -> Result<(ByteTx, ByteRx), EngineError> {
         if !self.is_up() {
             return Err(EngineError::Down);
         }
@@ -156,9 +151,7 @@ impl EngineHandle {
     /// Resolve `name` using the config's DNS server, through the tunnel.
     pub async fn resolve(&self, name: &str) -> Result<IpAddr, EngineError> {
         if !self.dns_configured {
-            return Err(EngineError::ResolveFailed(
-                "no DNS server in config".into(),
-            ));
+            return Err(EngineError::ResolveFailed("no DNS server in config".into()));
         }
         if !self.is_up() {
             return Err(EngineError::Down);
@@ -293,17 +286,19 @@ impl Device for PacketDevice {
 // Conversions.
 // ---------------------------------------------------------------------------
 
+// With smoltcp's `std` feature its wire address types are the std ones,
+// so these conversions are plain wrapping/unwrapping.
 fn smol_ip(ip: IpAddr) -> IpAddress {
     match ip {
-        IpAddr::V4(a) => IpAddress::Ipv4(Ipv4Address::from(a)),
-        IpAddr::V6(a) => IpAddress::Ipv6(Ipv6Address::from(a)),
+        IpAddr::V4(a) => IpAddress::Ipv4(a),
+        IpAddr::V6(a) => IpAddress::Ipv6(a),
     }
 }
 
 fn std_ip(ip: IpAddress) -> IpAddr {
     match ip {
-        IpAddress::Ipv4(a) => IpAddr::V4(Ipv4Addr::from(a)),
-        IpAddress::Ipv6(a) => IpAddr::V6(Ipv6Addr::from(a)),
+        IpAddress::Ipv4(a) => IpAddr::V4(a),
+        IpAddress::Ipv6(a) => IpAddr::V6(a),
         #[allow(unreachable_patterns)]
         _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
     }
@@ -432,8 +427,7 @@ fn run_engine(
         }
 
         // --- keep the handshake coming until the tunnel is up ------------
-        if !tunn.is_up()
-            && last_initiate.is_none_or(|t| t.elapsed() >= Duration::from_millis(250))
+        if !tunn.is_up() && last_initiate.is_none_or(|t| t.elapsed() >= Duration::from_millis(250))
         {
             tunn.initiate_handshake();
             last_initiate = Some(StdInstant::now());
@@ -484,9 +478,8 @@ fn run_engine(
                                 Err(e) => {
                                     let pd = pending_dns.remove(i);
                                     if let Some(reply) = pd.reply {
-                                        let _ = reply.send(Err(EngineError::ResolveFailed(
-                                            e.to_string(),
-                                        )));
+                                        let _ = reply
+                                            .send(Err(EngineError::ResolveFailed(e.to_string())));
                                     }
                                 }
                             }
@@ -518,17 +511,16 @@ fn run_engine(
                             Err(e) => {
                                 let pd = pending_dns.remove(i);
                                 if let Some(reply) = pd.reply {
-                                    let _ = reply.send(Err(EngineError::ResolveFailed(
-                                        e.to_string(),
-                                    )));
+                                    let _ =
+                                        reply.send(Err(EngineError::ResolveFailed(e.to_string())));
                                 }
                             }
                         }
                     } else {
                         let pd = pending_dns.remove(i);
                         if let Some(reply) = pd.reply {
-                            let _ =
-                                reply.send(Err(EngineError::ResolveFailed("DNS query failed".into())));
+                            let _ = reply
+                                .send(Err(EngineError::ResolveFailed("DNS query failed".into())));
                         }
                     }
                 }

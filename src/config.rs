@@ -183,12 +183,24 @@ pub enum ConfigError {
     Io(String),
     MissingInterface,
     MissingPeer,
-    MissingField { section: &'static str, key: &'static str },
-    InvalidKey { key: &'static str, reason: String },
+    MissingField {
+        section: &'static str,
+        key: &'static str,
+    },
+    InvalidKey {
+        key: &'static str,
+        reason: String,
+    },
     InvalidCidr(String),
-    InvalidIp { key: &'static str, value: String },
+    InvalidIp {
+        key: &'static str,
+        value: String,
+    },
     InvalidEndpoint(String),
-    InvalidNumber { key: &'static str, value: String },
+    InvalidNumber {
+        key: &'static str,
+        value: String,
+    },
     MalformedLine(String),
     UnknownSection(String),
 }
@@ -216,10 +228,12 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 fn decode_key(key: &'static str, value: &str) -> Result<[u8; 32], ConfigError> {
-    let bytes = B64.decode(value.trim()).map_err(|e| ConfigError::InvalidKey {
-        key,
-        reason: format!("not valid base64 ({e})"),
-    })?;
+    let bytes = B64
+        .decode(value.trim())
+        .map_err(|e| ConfigError::InvalidKey {
+            key,
+            reason: format!("not valid base64 ({e})"),
+        })?;
     <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| ConfigError::InvalidKey {
         key,
         reason: format!("must decode to 32 bytes, got {}", bytes.len()),
@@ -357,8 +371,7 @@ impl Config {
                             }
                         }
                         "PersistentKeepalive" => {
-                            b.persistent_keepalive =
-                                Some(parse_u16("PersistentKeepalive", value)?)
+                            b.persistent_keepalive = Some(parse_u16("PersistentKeepalive", value)?)
                         }
                         _ => {}
                     }
@@ -496,10 +509,7 @@ AllowedIPs = 10.0.0.0/8, 192.168.0.0/16, ::/0
     #[test]
     fn error_missing_peer() {
         let text = "[Interface]\nPrivateKey = AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\nAddress = 10.0.0.2/32\n";
-        assert!(matches!(
-            Config::parse(text),
-            Err(ConfigError::MissingPeer)
-        ));
+        assert!(matches!(Config::parse(text), Err(ConfigError::MissingPeer)));
     }
 
     #[test]
@@ -519,7 +529,10 @@ AllowedIPs = 10.0.0.0/8, 192.168.0.0/16, ::/0
         let text = "[Interface]\nPrivateKey = AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\nAllowedIPs = 0.0.0.0/0\n";
         assert!(matches!(
             Config::parse(text),
-            Err(ConfigError::MissingField { key: "Endpoint", .. })
+            Err(ConfigError::MissingField {
+                key: "Endpoint",
+                ..
+            })
         ));
     }
 
