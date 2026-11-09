@@ -1,0 +1,7 @@
+/target
+
+# Real configs contain a WireGuard private key — never commit them.
+*.conf
+!examples/*.conf.example
+*.key
+.env

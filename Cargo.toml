@@ -1,0 +1,20 @@
+[package]
+name = "wgproxyrs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Fully userspace WireGuard client in Rust that exposes the tunnel as a local SOCKS5/HTTP proxy — no interface, no routes, no root."
+repository = "https://github.com/yukiproz/wgproxyrs"
+keywords = ["wireguard", "proxy", "socks5", "vpn", "userspace"]
+categories = ["network-programming", "command-line-utilities"]
+
+[dependencies]
+# Intentionally empty for the scaffold. Planned, per DESIGN.md:
+#   boringtun (crates.io release) — WireGuard protocol core
+#   smoltcp                       — userspace TCP/IP netstack
+#   tokio                         — async runtime for listeners + tunnel loop
+
+[profile.release]
+lto = true
+codegen-units = 1
