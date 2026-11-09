@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.0 — 2026-11-09
+
+Config MTU is honoured. Until now the `[Interface] MTU` line was
+silently ignored as a wg-quick extra and the netstack hard-coded
+1280, so an eduVPN profile declaring `MTU = 1392` ran at 1280 with
+no signal anywhere. The line is now parsed and range-checked
+(576..=9000; anything else is a hard config error naming the key),
+a `--mtu <N>` flag overrides it for operators whose underlay needs
+something other than what the profile declares (resolution order:
+flag > config > default, in one place — `config::resolve_mtu`).
+The default stays 1280, the IPv6 minimum MTU (RFC 8200): the
+largest inner packet guaranteed to fit any path once WireGuard's
+overhead is added. `--check` prints the effective MTU and its
+source; the startup ready line carries `mtu=<n>`.
+
+Coverage: parser tests (canonical + mixed-case spelling, both
+range bounds, every invalid class), resolver-order test, and an
+end-to-end test that runs both netstacks at MTU 1420 and echoes a
+1392-byte UDP payload — a 1420-byte inner packet that a 1280 stack
+drops whole — through SOCKS5 UDP ASSOCIATE, byte-identical.
+
 ## 0.2.1 — 2026-11-09
 
 Hotfix: config keys are matched case-insensitively.

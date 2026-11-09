@@ -7,6 +7,7 @@
 PrivateKey = AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=
 Address = 10.0.0.2/32
 DNS = 10.0.0.1
+# MTU = 1392   # optional (576..=9000); default 1280, --mtu overrides
 
 [Peer]
 PublicKey = ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=

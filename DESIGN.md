@@ -112,6 +112,7 @@ peer** and routes by cryptokey routing, exactly like WireGuard itself.
 | Proxy authentication | ✅ Phase 3 (`--proxy-user`/`--proxy-pass`; RFC 1929 / HTTP Basic) |
 | Health/info endpoint | ✅ Phase 3 (`--info-bind` JSON + `wgproxyrs status --info <addr>` probe) |
 | Daemon mode | ✅ Phase 3 (`--daemon` / `--pidfile` / `--log-file` / `--silent`) |
+| Tunnel MTU from config | ✅ Phase 4 (config `MTU` honoured + `--mtu` override; §9) |
 | UDPClient/UDPServer static tunnels | ❌ Out of scope — wireproxy lists UDP tunnels as TODO itself; UDP ASSOCIATE covers dynamic UDP |
 | Transparent SNI proxy | ❌ Out of scope — see ROADMAP.md |
 | AmneziaWG | ❌ Out of scope — different protocol dialect, different threat model |
@@ -136,3 +137,34 @@ peer** and routes by cryptokey routing, exactly like WireGuard itself.
 9. **Auth is checked before any tunnel work** and never instead of it:
    a 407 / auth failure reveals nothing about tunnel state, and a passed
    auth still faces the fail-closed destination checks.
+
+## 9. Phase 4 — config MTU honoured (2026-11-09, v0.3.0)
+
+Motivating case, found live the same day: an eduVPN profile declaring
+`MTU = 1392` ran against v0.2.1, whose parser silently ignored the
+line (a tolerated wg-quick extra) while the netstack hard-coded 1280.
+Nothing failed — which is exactly the failure mode §8's predecessor
+(the dropped `PreSharedKey`) taught us to close: silence in both
+directions.
+
+10. **`MTU` is a parsed, validated key**, not a tolerated extra:
+    integer in 576..=9000, anything else a hard config error naming
+    the key. 576 is the IPv4 floor (RFC 791); 9000 is the jumbo
+    ceiling. A garbage MTU silently accepted would be a blackhole
+    factory, so it fails at parse time.
+11. **Resolution order is `--mtu` > config `MTU` > 1280**, decided in
+    exactly one function (`config::resolve_mtu`). The override exists
+    because the profile's MTU assumes a generic underlay: on a
+    1360-byte underlay, a 1392 profile cannot fit (1392 + WireGuard
+    overhead > 1360), and the operator's ~1300 must win without
+    editing the provider's file.
+12. **The default stays 1280 on purpose**: it is the IPv6 minimum MTU
+    (RFC 8200), the largest inner packet guaranteed to fit any path
+    once WireGuard's overhead is added. Always safe, never optimal —
+    profiles and operators opt out of it deliberately, per above.
+13. **Buffers were audited for the 9000 maximum**, not just the common
+    case: tunnel dst/recv buffers (64 KiB), engine UDP socket buffers
+    (64 KiB), proxy relay and shared-socket dispatch buffers (65535)
+    all fit a 9000-byte inner packet plus worst-case WireGuard
+    overhead with wide headroom. No silent truncation path exists;
+    the audit is recorded on `tunnel::MAX_PACKET`.

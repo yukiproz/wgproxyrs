@@ -25,8 +25,8 @@ that:
 
 ## Status
 
-**v0.2 — wireproxy parity set complete** (see [DESIGN.md](DESIGN.md) and
-[ROADMAP.md](ROADMAP.md)):
+**v0.3 — wireproxy parity set complete, config MTU honoured** (see
+[DESIGN.md](DESIGN.md) and [ROADMAP.md](ROADMAP.md)):
 
 - Stock WireGuard `.conf` parsing, `genkey`, and a `--check` mode that
   validates a config without touching the network.
@@ -48,6 +48,11 @@ that:
   `wgproxyrs status --info <addr>` probe that exits 0 only when the
   tunnel is up — built for launcher scripts.
 - **Daemon mode** (`--daemon`, `--pidfile`, `--log-file`, `--silent`).
+- **Config MTU honoured** (`MTU` in `[Interface]`, validated
+  576..=9000; `--mtu <N>` overrides it — for underlays where the
+  profile's MTU does not fit). Default 1280, the IPv6 floor:
+  always safe, deliberately not always optimal. `--check` reports
+  the effective MTU and where it came from.
 - Fail-closed everywhere, verified by tests: with no live handshake,
   CONNECT is refused, UDP ASSOCIATE is refused, TCP tunnels drop
   connections, and proxy auth never bypasses the tunnel-state check.
@@ -91,6 +96,10 @@ curl -s http://127.0.0.1:18099/
 # Daemon mode (pidfile default: ./<config-stem>.pid next to your shell's cwd):
 wgproxyrs --config ./wg0.conf --daemon --log-file ./wgproxyrs.log
 kill "$(cat ./wg0.pid)"
+
+# Tunnel MTU: the config's MTU line wins by default; --mtu overrides it
+# (e.g. a 1392 profile on a 1360 underlay fits at ~1300):
+wgproxyrs --config ./wg0.conf --mtu 1300
 ```
 
 ## Lineage
